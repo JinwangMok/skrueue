@@ -1,1 +1,9 @@
 draft.md
+secret/*
+skrueue_cluster_info_*
+*.log
+*.tmp
+*.bak
+*.swp
+*.DS_Store
+kubectl*

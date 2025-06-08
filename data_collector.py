@@ -18,7 +18,8 @@ import yaml
 
 # Kubernetes Python Client
 try:
-    from kubernetes import client, config
+    from kubernetes import client
+    import kubernetes.config as k8s_config
     from kubernetes.client.rest import ApiException
 except ImportError:
     print("kubernetes 패키지를 설치하세요: pip install kubernetes")
@@ -88,11 +89,14 @@ class DataCollector:
         self.logger = self._setup_logging()
         self.db_conn = self._setup_database()
         
-        # Kubernetes 클라이언트 초기화
+        # Kubernetes 클라이언트 초기화 (in-cluster or local)
+        from kubernetes.config.config_exception import ConfigException
         try:
-            config.load_incluster_config()  # 클러스터 내부에서 실행시
-        except:
-            config.load_kube_config()  # 로컬에서 실행시
+            k8s_config.load_incluster_config()
+            self.logger.info("✔️ In-cluster kubeconfig 로드 성공")
+        except ConfigException:
+            k8s_config.load_kube_config()
+            self.logger.info("✔️ 로컬 kubeconfig(~/.kube/config) 로드 성공")
             
         self.k8s_core = client.CoreV1Api()
         self.k8s_batch = client.BatchV1Api()

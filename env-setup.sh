@@ -170,7 +170,7 @@ install_spark_operator() {
     fi
     
     # Helm 레포지토리 추가
-    helm repo add spark-operator https://googlecloudplatform.github.io/spark-on-k8s-operator
+    helm repo add spark-operator https://kubeflow.github.io/spark-operator/
     helm repo update
     
     # Spark Operator 설치
@@ -184,7 +184,7 @@ install_spark_operator() {
     
     # 설치 완료 대기
     log_info "Spark Operator 시작 대기 중..."
-    kubectl wait --for=condition=available --timeout=300s deployment/spark-operator -n $NAMESPACE_SPARK
+    kubectl wait --for=condition=available --timeout=300s deployment/spark-operator -n $NAMESPACE_SPARK --selector app.kubernetes.io/instance=spark-operator
     
     log_info "Spark Operator 설치 완료"
 }
