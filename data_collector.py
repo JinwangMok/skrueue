@@ -1,7 +1,7 @@
-# """
+# data_collector.py
 # SKRueue RL 학습용 데이터 수집 시스템
 # 클러스터에서 실시간으로 작업 및 리소스 데이터를 수집하여 RL 훈련 데이터셋을 구축
-# """
+# 버그 수정 및 안정성 개선 버전
 
 import os
 import json
@@ -95,8 +95,12 @@ class DataCollector:
             k8s_config.load_incluster_config()
             self.logger.info("✔️ In-cluster kubeconfig 로드 성공")
         except ConfigException:
-            k8s_config.load_kube_config()
-            self.logger.info("✔️ 로컬 kubeconfig(~/.kube/config) 로드 성공")
+            try:
+                k8s_config.load_kube_config()
+                self.logger.info("✔️ 로컬 kubeconfig(~/.kube/config) 로드 성공")
+            except Exception as e:
+                self.logger.error(f"❌ kubeconfig 로드 실패: {e}")
+                raise
             
         self.k8s_core = client.CoreV1Api()
         self.k8s_batch = client.BatchV1Api()
@@ -111,8 +115,7 @@ class DataCollector:
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler('skrueue_collector.log'),
-                logging.StreamHandler()
+                logging.FileHandler('skrueue_collector.log')
             ]
         )
         return logging.getLogger('SKRueueDataCollector')
@@ -208,6 +211,24 @@ class DataCollector:
                     if e.status != 404:  # Kueue가 설치되지 않은 경우는 무시
                         self.logger.warning(f"Workload 수집 실패: {e}")
                         
+                # SparkApplications 수집 (있는 경우)
+                try:
+                    spark_apps = self.k8s_custom.list_namespaced_custom_object(
+                        group="sparkoperator.k8s.io",
+                        version="v1beta2",
+                        namespace=namespace,
+                        plural="sparkapplications"
+                    )
+                    
+                    for spark_app in spark_apps.get('items', []):
+                        job_data = self._extract_spark_app_data(spark_app, namespace)
+                        if job_data:
+                            jobs.append(job_data)
+                            
+                except ApiException as e:
+                    if e.status != 404:  # Spark Operator가 설치되지 않은 경우는 무시
+                        self.logger.warning(f"SparkApplication 수집 실패: {e}")
+                        
             except Exception as e:
                 self.logger.error(f"네임스페이스 {namespace} 작업 수집 실패: {e}")
                 
@@ -242,8 +263,8 @@ class DataCollector:
                 elif status.active:
                     job_status = "Running"
                     
-            # OOM 확인
-            oom_killed = self._check_oom_status(job, namespace)
+            # OOM 확인 (안전한 방식으로)
+            oom_killed = self._check_oom_status_safe(job, namespace)
             
             # Spark 설정 추출 (있는 경우)
             spark_config = self._extract_spark_config(job)
@@ -271,7 +292,90 @@ class DataCollector:
         except Exception as e:
             self.logger.error(f"Job 데이터 추출 실패 {job.metadata.name}: {e}")
             return None
+
+    def _extract_spark_app_data(self, spark_app, namespace: str) -> Optional[JobData]:
+        """SparkApplication에서 JobData 추출"""
+        try:
+            metadata = spark_app.get('metadata', {})
+            spec = spark_app.get('spec', {})
+            status = spark_app.get('status', {})
             
+            # 기본 정보
+            job_id = metadata.get('uid', 'unknown')
+            name = metadata.get('name', 'unknown')
+            submission_time = metadata.get('creationTimestamp')
+            if submission_time:
+                submission_time = datetime.fromisoformat(submission_time.replace('Z', '+00:00'))
+            
+            # 리소스 추출 (SparkApplication 형식)
+            driver_spec = spec.get('driver', {})
+            executor_spec = spec.get('executor', {})
+            
+            # CPU 및 메모리 계산
+            driver_cores = driver_spec.get('cores', 1)
+            driver_memory = self._parse_memory(driver_spec.get('memory', '1g'))
+            
+            executor_cores = executor_spec.get('cores', 1)
+            executor_memory = self._parse_memory(executor_spec.get('memory', '1g'))
+            executor_instances = executor_spec.get('instances', 1)
+            
+            total_cpu = driver_cores + (executor_cores * executor_instances)
+            total_memory = driver_memory + (executor_memory * executor_instances)
+            
+            # 상태 결정
+            app_state = status.get('applicationState', {}).get('state', 'UNKNOWN')
+            job_status = self._map_spark_status(app_state)
+            
+            # 시간 정보
+            start_time = None
+            completion_time = None
+            if 'executionAttempts' in status:
+                attempts = status['executionAttempts']
+                if attempts:
+                    latest_attempt = attempts[-1]
+                    if 'executionStart' in latest_attempt:
+                        start_time = datetime.fromisoformat(latest_attempt['executionStart'].replace('Z', '+00:00'))
+                    if 'executionEnd' in latest_attempt:
+                        completion_time = datetime.fromisoformat(latest_attempt['executionEnd'].replace('Z', '+00:00'))
+            
+            return JobData(
+                job_id=job_id,
+                name=name,
+                namespace=namespace,
+                submission_time=submission_time or datetime.now(),
+                start_time=start_time,
+                completion_time=completion_time,
+                cpu_request=total_cpu,
+                memory_request=total_memory,
+                cpu_limit=total_cpu * 1.2,  # 약간의 여유
+                memory_limit=total_memory * 1.2,
+                priority=self._extract_priority_from_labels(metadata.get('labels', {})),
+                user=metadata.get('labels', {}).get('user', 'spark-user'),
+                queue_name=metadata.get('labels', {}).get('queue', 'default'),
+                status=job_status,
+                restart_count=len(status.get('executionAttempts', [])) - 1,
+                oom_killed=False,  # SparkApplication에서는 별도 확인 필요
+                spark_config=spec.get('sparkConf', {})
+            )
+            
+        except Exception as e:
+            self.logger.error(f"SparkApplication 데이터 추출 실패 {spark_app.get('metadata', {}).get('name', 'unknown')}: {e}")
+            return None
+
+    def _map_spark_status(self, spark_state: str) -> str:
+        """Spark 상태를 표준 Job 상태로 매핑"""
+        state_mapping = {
+            'SUBMITTED': 'Pending',
+            'RUNNING': 'Running', 
+            'COMPLETED': 'Succeeded',
+            'FAILED': 'Failed',
+            'UNKNOWN': 'Pending',
+            'INVALIDATING': 'Failed',
+            'SUCCEEDING': 'Running',
+            'FAILING': 'Running'
+        }
+        return state_mapping.get(spark_state, 'Pending')
+        
     def _extract_resources(self, spec) -> Tuple[float, float, float, float]:
         """리소스 요구사항 추출"""
         cpu_request = cpu_limit = 0.0
@@ -296,6 +400,7 @@ class DataCollector:
         if not cpu_str:
             return 0.0
             
+        cpu_str = str(cpu_str)
         if cpu_str.endswith('m'):
             return float(cpu_str[:-1]) / 1000.0
         return float(cpu_str)
@@ -305,6 +410,7 @@ class DataCollector:
         if not memory_str:
             return 0.0
             
+        memory_str = str(memory_str)
         units = {
             'Ki': 1024,
             'Mi': 1024**2,
@@ -321,7 +427,10 @@ class DataCollector:
                 value = float(memory_str[:-len(unit)])
                 return (value * multiplier) / (1024**3)  # GB로 변환
                 
-        return float(memory_str) / (1024**3)  # 바이트를 GB로
+        try:
+            return float(memory_str) / (1024**3)  # 바이트를 GB로
+        except ValueError:
+            return 0.0
         
     def collect_cluster_state(self) -> ClusterState:
         """현재 클러스터 상태 수집"""
@@ -363,13 +472,16 @@ class DataCollector:
             pending_jobs = 0
             
             for namespace in self.config.namespaces:
-                jobs = self.k8s_batch.list_namespaced_job(namespace=namespace)
-                for job in jobs.items:
-                    if job.status:
-                        if job.status.active:
-                            running_jobs += 1
-                        elif not job.status.succeeded and not job.status.failed:
-                            pending_jobs += 1
+                try:
+                    jobs = self.k8s_batch.list_namespaced_job(namespace=namespace)
+                    for job in jobs.items:
+                        if job.status:
+                            if job.status.active:
+                                running_jobs += 1
+                            elif not job.status.succeeded and not job.status.failed:
+                                pending_jobs += 1
+                except Exception as e:
+                    self.logger.warning(f"네임스페이스 {namespace}의 작업 상태 확인 실패: {e}")
                             
             return ClusterState(
                 timestamp=datetime.now(),
@@ -441,8 +553,8 @@ class DataCollector:
         except Exception as e:
             self.logger.error(f"데이터 저장 실패: {e}")
             
-    def _check_oom_status(self, job, namespace: str) -> bool:
-        """작업의 OOM 발생 여부 확인"""
+    def _check_oom_status_safe(self, job, namespace: str) -> bool:
+        """안전한 방식으로 작업의 OOM 발생 여부 확인"""
         try:
             # 작업과 연관된 팟들 확인
             pods = self.k8s_core.list_namespaced_pod(
@@ -453,10 +565,24 @@ class DataCollector:
             for pod in pods.items:
                 if pod.status.container_statuses:
                     for container_status in pod.status.container_statuses:
-                        if (container_status.last_termination_reason == 'OOMKilled' or
-                            (container_status.state and container_status.state.terminated and 
-                             container_status.state.terminated.reason == 'OOMKilled')):
-                            return True
+                        # 안전한 속성 접근
+                        try:
+                            # 현재 상태 확인
+                            if (container_status.state and 
+                                container_status.state.terminated and 
+                                container_status.state.terminated.reason == 'OOMKilled'):
+                                return True
+                                
+                            # 이전 상태 확인 (속성이 있는 경우에만)
+                            if (container_status.last_state and
+                                container_status.last_state.terminated and
+                                container_status.last_state.terminated.reason == 'OOMKilled'):
+                                return True
+                                
+                        except AttributeError:
+                            # 속성이 없는 경우 무시하고 계속
+                            continue
+                            
             return False
             
         except Exception as e:
@@ -489,10 +615,56 @@ class DataCollector:
             if (job.spec.template.spec.priority_class_name or 
                 (job.metadata.labels and 'priority' in job.metadata.labels)):
                 # 우선순위 클래스나 레이블에서 추출
-                return job.metadata.labels.get('priority', 0) if job.metadata.labels else 0
+                return int(job.metadata.labels.get('priority', 0)) if job.metadata.labels else 0
             return 0
-        except Exception:
+        except (ValueError, TypeError):
             return 0
+
+    def _extract_priority_from_labels(self, labels: Dict) -> int:
+        """레이블에서 우선순위 추출"""
+        try:
+            return int(labels.get('priority', 0))
+        except (ValueError, TypeError):
+            return 0
+
+    def _extract_workload_data(self, workload, namespace: str) -> Optional[JobData]:
+        """Kueue Workload에서 JobData 추출"""
+        try:
+            metadata = workload.get('metadata', {})
+            spec = workload.get('spec', {})
+            status = workload.get('status', {})
+            
+            # 기본 정보
+            job_id = metadata.get('uid', 'unknown')
+            name = metadata.get('name', 'unknown')
+            submission_time = metadata.get('creationTimestamp')
+            if submission_time:
+                submission_time = datetime.fromisoformat(submission_time.replace('Z', '+00:00'))
+            
+            # 기본값으로 설정 (Workload에서는 정확한 리소스 추출이 복잡함)
+            return JobData(
+                job_id=job_id,
+                name=name,
+                namespace=namespace,
+                submission_time=submission_time or datetime.now(),
+                start_time=None,
+                completion_time=None,
+                cpu_request=1.0,  # 기본값
+                memory_request=1.0,  # 기본값
+                cpu_limit=2.0,
+                memory_limit=2.0,
+                priority=0,
+                user='workload-user',
+                queue_name=spec.get('queueName', 'default'),
+                status='Pending',  # Workload는 보통 Pending 상태
+                restart_count=0,
+                oom_killed=False,
+                spark_config=None
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Workload 데이터 추출 실패: {e}")
+            return None
             
     def export_training_data(self, output_file: str = "skrueue_training_data.csv"):
         """학습용 데이터셋을 CSV로 내보내기"""
@@ -501,6 +673,15 @@ class DataCollector:
             jobs_df = pd.read_sql_query("SELECT * FROM jobs", self.db_conn)
             cluster_df = pd.read_sql_query("SELECT * FROM cluster_states", self.db_conn)
             events_df = pd.read_sql_query("SELECT * FROM scheduling_events", self.db_conn)
+            
+            # 데이터 유무 확인
+            if len(jobs_df) == 0:
+                self.logger.warning("내보낼 작업 데이터가 없습니다.")
+                return None
+                
+            if len(cluster_df) == 0:
+                self.logger.warning("내보낼 클러스터 상태 데이터가 없습니다.")
+                return None
             
             # 시계열 데이터 결합을 위한 전처리
             jobs_df['submission_time'] = pd.to_datetime(jobs_df['submission_time'])

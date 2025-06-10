@@ -1,7 +1,7 @@
-# """
+# sample_workload_generator.py
 # SKRueue 샘플 워크로드 생성기
 # 다양한 유형의 Spark + Iceberg 배치 작업을 자동으로 생성하여 실험 환경 구축
-# """
+# Spark Operator 문제 대응 및 안정성 개선 버전
 
 import os
 import time
@@ -28,17 +28,142 @@ class WorkloadTemplate:
     failure_rate: float = 0.0  # 의도적 실패율 (테스트용)
 
 class SparkJobGenerator:
-    """Spark 작업 생성기"""
+    """Spark 작업 생성기 - 안정성 개선 버전"""
     
     def __init__(self, namespace: str = "skrueue-test", 
-                 image_repository: str = "apache/spark:3.4.0"):
+                 image_repository: str = "apache/spark:3.4.0",
+                 fallback_to_k8s_jobs: bool = True):
         self.namespace = namespace
         self.image_repository = image_repository
+        self.fallback_to_k8s_jobs = fallback_to_k8s_jobs
         self.logger = logging.getLogger('SparkJobGenerator')
         self.job_counter = 0
         
+        # 환경 상태 확인
+        self.spark_operator_available = self._check_spark_operator()
+        self.service_account_ready = self._check_service_account()
+        
         # 워크로드 템플릿 정의
         self.templates = self._define_templates()
+        
+        # 상태 로깅
+        self.logger.info(f"환경 상태 - Spark Operator: {self.spark_operator_available}, ServiceAccount: {self.service_account_ready}")
+        
+    def _check_spark_operator(self) -> bool:
+        """Spark Operator 상태 확인"""
+        try:
+            result = subprocess.run(['kubectl', 'get', 'pods', '-n', 'spark-operator'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                # 웹훅 상태 확인
+                webhook_result = subprocess.run(
+                    ['kubectl', 'get', 'pods', '-n', 'spark-operator', '-l', 'app.kubernetes.io/name=spark-operator-webhook'],
+                    capture_output=True, text=True
+                )
+                if 'CrashLoopBackOff' in webhook_result.stdout:
+                    self.logger.warning("Spark Operator 웹훅이 CrashLoopBackOff 상태입니다.")
+                    return False
+                return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Spark Operator 상태 확인 실패: {e}")
+            return False
+    
+    def _check_service_account(self) -> bool:
+        """ServiceAccount 존재 확인"""
+        try:
+            result = subprocess.run([
+                'kubectl', 'get', 'serviceaccount', 'skrueue-agent', '-n', self.namespace
+            ], capture_output=True, text=True)
+            return result.returncode == 0
+        except Exception as e:
+            self.logger.warning(f"ServiceAccount 확인 실패: {e}")
+            return False
+    
+    def _setup_service_account(self):
+        """ServiceAccount 및 권한 설정"""
+        try:
+            self.logger.info("ServiceAccount 및 권한 설정 중...")
+            
+            # ServiceAccount 생성
+            sa_yaml = {
+                'apiVersion': 'v1',
+                'kind': 'ServiceAccount',
+                'metadata': {
+                    'name': 'skrueue-agent',
+                    'namespace': self.namespace
+                }
+            }
+            
+            # Role 생성
+            role_yaml = {
+                'apiVersion': 'rbac.authorization.k8s.io/v1',
+                'kind': 'Role',
+                'metadata': {
+                    'namespace': self.namespace,
+                    'name': 'spark-role'
+                },
+                'rules': [
+                    {
+                        'apiGroups': [''],
+                        'resources': ['pods', 'services', 'configmaps'],
+                        'verbs': ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+                    },
+                    {
+                        'apiGroups': [''],
+                        'resources': ['secrets'],
+                        'verbs': ['get', 'list', 'watch']
+                    }
+                ]
+            }
+            
+            # RoleBinding 생성
+            binding_yaml = {
+                'apiVersion': 'rbac.authorization.k8s.io/v1',
+                'kind': 'RoleBinding',
+                'metadata': {
+                    'name': 'spark-rolebinding',
+                    'namespace': self.namespace
+                },
+                'subjects': [{
+                    'kind': 'ServiceAccount',
+                    'name': 'skrueue-agent',
+                    'namespace': self.namespace
+                }],
+                'roleRef': {
+                    'kind': 'Role',
+                    'name': 'spark-role',
+                    'apiGroup': 'rbac.authorization.k8s.io'
+                }
+            }
+            
+            # 리소스들 적용
+            for yaml_content in [sa_yaml, role_yaml, binding_yaml]:
+                self._apply_yaml(yaml_content)
+            
+            self.service_account_ready = True
+            self.logger.info("ServiceAccount 설정 완료")
+            
+        except Exception as e:
+            self.logger.error(f"ServiceAccount 설정 실패: {e}")
+            
+    def _apply_yaml(self, yaml_content: dict):
+        """YAML 리소스 적용"""
+        try:
+            process = subprocess.Popen(
+                ['kubectl', 'apply', '-f', '-'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout, stderr = process.communicate(input=yaml.dump(yaml_content))
+            
+            if process.returncode != 0:
+                self.logger.warning(f"YAML 적용 경고: {stderr}")
+                
+        except Exception as e:
+            self.logger.error(f"YAML 적용 실패: {e}")
         
     def _define_templates(self) -> List[WorkloadTemplate]:
         """다양한 워크로드 템플릿 정의"""
@@ -200,6 +325,7 @@ class SparkJobGenerator:
                 }
             },
             'spec': {
+                'sparkVersion': self.image_repository.split(':')[-1],
                 'type': 'Python',
                 'pythonVersion': '3',
                 'mode': 'cluster',
@@ -265,11 +391,177 @@ class SparkJobGenerator:
         combined_yaml = yaml.dump(configmap) + "\n---\n" + yaml.dump(spark_app)
         
         return combined_yaml
+
+    def generate_k8s_job_yaml(self, template: WorkloadTemplate) -> str:
+        """대안으로 Kubernetes Job YAML 생성"""
+        self.job_counter += 1
+        job_name = f"k8s-{template.name}-{self.job_counter:04d}"
+        
+        # 리소스 요구사항 매핑
+        resource_map = {
+            "cpu-intensive": {"cpu": "1000m", "memory": "2Gi"},
+            "memory-intensive": {"cpu": "500m", "memory": "4Gi"},
+            "io-intensive": {"cpu": "800m", "memory": "1Gi"},
+            "mixed": {"cpu": "800m", "memory": "2Gi"},
+            "lightweight": {"cpu": "200m", "memory": "512Mi"}
+        }
+        
+        resources = resource_map.get(template.category, {"cpu": "500m", "memory": "1Gi"})
+        
+        # 작업 스크립트 생성
+        script = self._generate_k8s_job_script(template)
+        
+        job_yaml = {
+            'apiVersion': 'batch/v1',
+            'kind': 'Job',
+            'metadata': {
+                'name': job_name,
+                'namespace': self.namespace,
+                'labels': {
+                    'app': 'skrueue-test',
+                    'workload-type': template.category,
+                    'scheduler': 'default-scheduler',
+                    'priority': str(template.priority),
+                    'template': template.name
+                },
+                'annotations': {
+                    'skrueue.ai/estimated-duration': str(template.estimated_duration_minutes),
+                    'skrueue.ai/workload-category': template.category,
+                    'skrueue.ai/description': template.description,
+                    'skrueue.ai/fallback-job': 'true'
+                }
+            },
+            'spec': {
+                'backoffLimit': 2,
+                'activeDeadlineSeconds': template.estimated_duration_minutes * 60 * 2,
+                'template': {
+                    'metadata': {
+                        'labels': {
+                            'job-name': job_name,
+                            'workload-type': template.category
+                        }
+                    },
+                    'spec': {
+                        'restartPolicy': 'Never',
+                        'containers': [{
+                            'name': 'worker',
+                            'image': 'busybox:1.35',
+                            'command': ['sh', '-c', script],
+                            'resources': {
+                                'requests': resources,
+                                'limits': {
+                                    'cpu': str(int(resources['cpu'][:-1]) * 2) + 'm',
+                                    'memory': resources['memory']
+                                }
+                            },
+                            'env': [
+                                {'name': 'JOB_NAME', 'value': job_name},
+                                {'name': 'JOB_TYPE', 'value': template.category},
+                                {'name': 'DURATION', 'value': str(template.estimated_duration_minutes * 60)},
+                                {'name': 'TEMPLATE', 'value': template.name}
+                            ]
+                        }]
+                    }
+                }
+            }
+        }
+        
+        return yaml.dump(job_yaml)
+
+    def _generate_k8s_job_script(self, template: WorkloadTemplate) -> str:
+        """Kubernetes Job용 스크립트 생성"""
+        duration = template.estimated_duration_minutes * 60
+        
+        base_script = f'''echo "🚀 {template.description}"
+echo "카테고리: {template.category}"
+echo "예상 실행 시간: {template.estimated_duration_minutes}분"
+echo "시작 시간: $(date)"
+
+start_time=$(date +%s)
+iteration=0
+'''
+
+        if template.category == "cpu-intensive":
+            work_script = '''
+# CPU 집약적 작업 시뮬레이션
+while [ $(($(date +%s) - start_time)) -lt ''' + str(duration) + ''' ]; do
+    for i in $(seq 1 1000); do
+        result=$(awk 'BEGIN {for(i=1;i<=100;i++) sum+=sqrt(i*i); print sum}')
+    done
+    iteration=$((iteration + 1))
+    if [ $((iteration % 10)) -eq 0 ]; then
+        elapsed=$(($(date +%s) - start_time))
+        echo "CPU 작업 진행률: $((elapsed * 100 / ''' + str(duration) + '''))% (반복: $iteration)"
+    fi
+done'''
+
+        elif template.category == "memory-intensive":
+            work_script = '''
+# 메모리 집약적 작업 시뮬레이션
+while [ $(($(date +%s) - start_time)) -lt ''' + str(duration) + ''' ]; do
+    temp_file="/tmp/mem_test_$(date +%s%N)"
+    dd if=/dev/zero of="$temp_file" bs=1M count=50 2>/dev/null
+    iteration=$((iteration + 1))
+    if [ $((iteration % 5)) -eq 0 ]; then
+        elapsed=$(($(date +%s) - start_time))
+        echo "메모리 작업 진행률: $((elapsed * 100 / ''' + str(duration) + '''))% (파일: $iteration개)"
+        ls /tmp/mem_test_* 2>/dev/null | wc -l
+    fi
+    sleep 3
+done
+rm -f /tmp/mem_test_* 2>/dev/null'''
+
+        elif template.category == "io-intensive":
+            work_script = '''
+# I/O 집약적 작업 시뮬레이션  
+while [ $(($(date +%s) - start_time)) -lt ''' + str(duration) + ''' ]; do
+    test_file="/tmp/io_test_$iteration"
+    for i in $(seq 1 50); do
+        echo "데이터 라인 $i: $(date +%s%N)" >> "$test_file"
+    done
+    wc -l "$test_file" >/dev/null
+    rm -f "$test_file"
+    iteration=$((iteration + 1))
+    if [ $((iteration % 20)) -eq 0 ]; then
+        elapsed=$(($(date +%s) - start_time))
+        echo "I/O 작업 진행률: $((elapsed * 100 / ''' + str(duration) + '''))% (파일 처리: $iteration개)"
+    fi
+    sleep 1
+done'''
+
+        else:  # mixed, lightweight
+            work_script = '''
+# 혼합/경량 작업 시뮬레이션
+while [ $(($(date +%s) - start_time)) -lt ''' + str(duration) + ''' ]; do
+    # 간단한 계산
+    result=$(awk 'BEGIN {print sqrt(''' + str(random.randint(1, 1000)) + ''')}')
+    
+    # 간단한 파일 작업
+    echo "작업 $iteration: $result" > "/tmp/work_$iteration"
+    cat "/tmp/work_$iteration" >/dev/null
+    rm -f "/tmp/work_$iteration"
+    
+    iteration=$((iteration + 1))
+    if [ $((iteration % 30)) -eq 0 ]; then
+        elapsed=$(($(date +%s) - start_time))
+        echo "작업 진행률: $((elapsed * 100 / ''' + str(duration) + '''))% (처리: $iteration회)"
+    fi
+    sleep 2
+done'''
+
+        end_script = '''
+elapsed=$(($(date +%s) - start_time))
+echo "✅ 작업 완료: $(date)"
+echo "실제 실행 시간: ${elapsed}초"
+echo "총 반복 횟수: $iteration"
+'''
+
+        return base_script + work_script + end_script
         
     def _generate_python_code(self, template: WorkloadTemplate) -> str:
-        """템플릿별 Python 코드 생성"""
+        """템플릿별 Python 코드 생성 (기존 코드 유지)"""
         
-        base_imports = """
+        base_imports = f'''
 import time
 import random
 import sys
@@ -277,16 +569,16 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 
-spark = SparkSession.builder.appName("{}").getOrCreate()
-print(f"Starting job: {}")
+spark = SparkSession.builder.appName("{template.name}").getOrCreate()
+print(f"Starting job: {template.description}")
 start_time = time.time()
 
 try:
-""".format(template.name, template.description)
+'''
 
-        # 템플릿별 특화 코드
+        # 템플릿별 특화 코드 (기존과 동일)
         if template.category == "cpu-intensive":
-            job_code = """
+            job_code = '''
     # CPU 집약적 작업: 복잡한 수학 연산
     data = [(i, random.random(), random.random()) for i in range(1000000)]
     df = spark.createDataFrame(data, ["id", "x", "y"])
@@ -306,10 +598,10 @@ try:
     )
     
     print(f"CPU 집약적 작업 완료. 결과 레코드 수: {result.count()}")
-"""
+'''
 
         elif template.category == "memory-intensive":
-            job_code = """
+            job_code = '''
     # 메모리 집약적 작업: 대용량 데이터 처리
     # 큰 데이터셋 생성
     large_data = [(i, f"user_{i}", random.randint(1, 1000), random.random() * 10000) 
@@ -329,10 +621,10 @@ try:
         count = result.filter(col("rank") <= 100).count()
         print(f"Iteration {i+1}: Top 100 per category count: {count}")
         time.sleep(10)  # 메모리 압박 지속
-"""
+'''
 
         elif template.category == "io-intensive":
-            job_code = """
+            job_code = '''
     # I/O 집약적 작업: 다중 조인 및 파일 처리
     # 여러 데이터셋 생성
     users = [(i, f"user_{i}", random.choice(["A", "B", "C"])) for i in range(100000)]
@@ -354,10 +646,10 @@ try:
                      )
     
     print(f"I/O 집약적 작업 완료. 결과 레코드 수: {result.count()}")
-"""
+'''
 
         elif template.category == "mixed":
-            job_code = """
+            job_code = '''
     # 혼합 워크로드: CPU + 메모리 + I/O
     # 시계열 데이터 생성
     import datetime
@@ -388,10 +680,10 @@ try:
                           when(col("stddev_value") > 20, 1).otherwise(0))
     
     print(f"혼합 워크로드 완료. 결과 레코드 수: {result.count()}")
-"""
+'''
 
         elif template.category == "lightweight":
-            job_code = """
+            job_code = '''
     # 경량 작업: 간단한 데이터 검증
     sample_data = [(i, f"value_{i}", random.choice([None, "valid", "invalid"])) 
                    for i in range(10000)]
@@ -403,10 +695,10 @@ try:
     valid_count = df.filter(col("status") == "valid").count()
     
     print(f"데이터 검증 완료 - 전체: {total_count}, NULL: {null_count}, 유효: {valid_count}")
-"""
+'''
 
         else:  # memory-stress-test
-            job_code = """
+            job_code = f'''
     # 메모리 스트레스 테스트: 의도적으로 OOM 유발
     print("메모리 스트레스 테스트 시작...")
     
@@ -414,8 +706,8 @@ try:
     data_sizes = [1000000, 2000000, 5000000]  # 점점 큰 데이터셋
     
     for size in data_sizes:
-        print(f"Processing dataset of size: {size}")
-        large_data = [(i, f"data_{i}" * 100, random.random()) for i in range(size)]
+        print(f"Processing dataset of size: {{size}}")
+        large_data = [(i, f"data_{{i}}" * 100, random.random()) for i in range(size)]
         df = spark.createDataFrame(large_data, ["id", "large_text", "value"])
         
         # 메모리 집약적 연산
@@ -426,17 +718,17 @@ try:
         )
         
         count = result.count()
-        print(f"Processed {count} groups for size {size}")
+        print(f"Processed {{count}} groups for size {{size}}")
         
         # 실패 확률 적용
-        if random.random() < {}:
+        if random.random() < {template.failure_rate}:
             print("Simulating failure...")
             raise Exception("Simulated OOM or processing failure")
             
         time.sleep(15)  # 메모리 압박 지속
-""".format(template.failure_rate)
+'''
 
-        cleanup_code = """
+        cleanup_code = '''
 except Exception as e:
     print(f"Job failed with error: {e}")
     sys.exit(1)
@@ -444,15 +736,32 @@ finally:
     elapsed_time = time.time() - start_time
     print(f"Job completed in {elapsed_time:.2f} seconds")
     spark.stop()
-"""
+'''
 
         return base_imports + job_code + cleanup_code
 
     def submit_job(self, template: WorkloadTemplate, 
-                   additional_config: Dict = None) -> bool:
-        """작업을 클러스터에 제출"""
+                   additional_config: Dict = None, force_k8s_job: bool = False) -> bool:
+        """작업을 클러스터에 제출 - 안정성 개선"""
+        
+        # ServiceAccount 확인 및 설정
+        if not self.service_account_ready:
+            self._setup_service_account()
+        
+        # SparkApplication 또는 Kubernetes Job 결정
+        use_spark = (self.spark_operator_available and 
+                    self.service_account_ready and 
+                    not force_k8s_job)
+        
         try:
-            yaml_content = self.generate_spark_application_yaml(template, additional_config)
+            if use_spark:
+                yaml_content = self.generate_spark_application_yaml(template, additional_config)
+                job_type = "SparkApplication"
+            else:
+                yaml_content = self.generate_k8s_job_yaml(template)
+                job_type = "Kubernetes Job"
+                
+            self.logger.info(f"제출할 작업 유형: {job_type}")
             
             # kubectl apply로 제출
             process = subprocess.Popen(
@@ -466,19 +775,60 @@ finally:
             stdout, stderr = process.communicate(input=yaml_content)
             
             if process.returncode == 0:
-                job_name = f"{template.name}-{self.job_counter:04d}"
-                self.logger.info(f"작업 제출 성공: {job_name}")
+                if use_spark:
+                    job_name = f"{template.name}-{self.job_counter:04d}"
+                else:
+                    job_name = f"k8s-{template.name}-{self.job_counter:04d}"
+                    
+                self.logger.info(f"작업 제출 성공: {job_name} ({job_type})")
+                
+                # 작업 상태 확인 (5초 후)
+                time.sleep(5)
+                self._verify_job_status(job_name, use_spark)
+                
                 return True
             else:
                 self.logger.error(f"작업 제출 실패: {stderr}")
+                
+                # SparkApplication 실패 시 Kubernetes Job으로 재시도
+                if use_spark and self.fallback_to_k8s_jobs:
+                    self.logger.info("SparkApplication 실패, Kubernetes Job으로 재시도...")
+                    return self.submit_job(template, additional_config, force_k8s_job=True)
+                    
                 return False
                 
         except Exception as e:
             self.logger.error(f"작업 제출 중 오류: {e}")
+            
+            # 예외 발생 시도 Kubernetes Job으로 재시도
+            if use_spark and self.fallback_to_k8s_jobs:
+                self.logger.info("예외 발생, Kubernetes Job으로 재시도...")
+                return self.submit_job(template, additional_config, force_k8s_job=True)
+                
             return False
 
+    def _verify_job_status(self, job_name: str, is_spark_app: bool):
+        """작업 상태 확인"""
+        try:
+            if is_spark_app:
+                result = subprocess.run([
+                    'kubectl', 'get', 'sparkapplication', job_name, '-n', self.namespace
+                ], capture_output=True, text=True)
+            else:
+                result = subprocess.run([
+                    'kubectl', 'get', 'job', job_name, '-n', self.namespace
+                ], capture_output=True, text=True)
+                
+            if result.returncode == 0:
+                self.logger.info(f"작업 상태 확인 성공: {job_name}")
+            else:
+                self.logger.warning(f"작업 상태 확인 실패: {job_name}")
+                
+        except Exception as e:
+            self.logger.warning(f"작업 상태 확인 중 오류: {e}")
+
 class WorkloadGenerator:
-    """워크로드 생성 메인 클래스"""
+    """워크로드 생성 메인 클래스 - 안정성 개선 버전"""
     
     def __init__(self, namespace: str = "skrueue-test"):
         self.namespace = namespace
@@ -486,7 +836,7 @@ class WorkloadGenerator:
         self.spark_generator = SparkJobGenerator(namespace)
         
     def generate_realistic_workload_pattern(self, duration_hours: int = 24) -> List[Dict]:
-        """현실적인 워크로드 패턴 생성"""
+        """현실적인 워크로드 패턴 생성 (기존과 동일)"""
         workload_schedule = []
         
         # 시간대별 워크로드 패턴 정의
@@ -577,11 +927,12 @@ class WorkloadGenerator:
         return workload_schedule
         
     def run_workload_simulation(self, schedule: List[Dict]):
-        """워크로드 시뮬레이션 실행"""
+        """워크로드 시뮬레이션 실행 - 안정성 개선"""
         self.logger.info(f"워크로드 시뮬레이션 시작: {len(schedule)}개 작업 예정")
         
         templates_map = {t.name: t for t in self.spark_generator.templates}
         submitted_count = 0
+        failed_count = 0
         
         for job_info in schedule:
             # 제출 시간까지 대기
@@ -603,17 +954,19 @@ class WorkloadGenerator:
                 success = self.spark_generator.submit_job(template, additional_config)
                 if success:
                     submitted_count += 1
-                    self.logger.info(f"진행률: {submitted_count}/{len(schedule)} "
-                                   f"({submitted_count/len(schedule)*100:.1f}%)")
                 else:
-                    self.logger.error(f"작업 제출 실패: {template_name}")
+                    failed_count += 1
+                    
+                self.logger.info(f"진행률: {submitted_count + failed_count}/{len(schedule)} "
+                               f"(성공: {submitted_count}, 실패: {failed_count})")
             else:
                 self.logger.error(f"알 수 없는 템플릿: {template_name}")
+                failed_count += 1
                 
-        self.logger.info(f"워크로드 시뮬레이션 완료: {submitted_count}개 작업 제출")
+        self.logger.info(f"워크로드 시뮬레이션 완료: {submitted_count}개 작업 제출 성공, {failed_count}개 실패")
         
     def _add_job_variance(self, template: WorkloadTemplate) -> Dict:
-        """작업에 변동성 추가"""
+        """작업에 변동성 추가 (기존과 동일)"""
         variance_config = {}
         
         # 실행자 수 변동 (±1)
@@ -632,7 +985,7 @@ class WorkloadGenerator:
 
 def main():
     """메인 실행 함수"""
-    parser = argparse.ArgumentParser(description='SKRueue 샘플 워크로드 생성기')
+    parser = argparse.ArgumentParser(description='SKRueue 샘플 워크로드 생성기 - 안정성 개선 버전')
     parser.add_argument('--mode', choices=['single', 'batch', 'simulation'], 
                        default='simulation', help='실행 모드')
     parser.add_argument('--template', type=str, help='단일 템플릿 이름')
@@ -642,6 +995,8 @@ def main():
     parser.add_argument('--namespace', type=str, default='skrueue-test', 
                        help='대상 네임스페이스')
     parser.add_argument('--dry-run', action='store_true', help='실제 제출 없이 YAML만 출력')
+    parser.add_argument('--force-k8s-jobs', action='store_true', 
+                       help='SparkApplication 대신 Kubernetes Job 강제 사용')
     
     args = parser.parse_args()
     
@@ -652,6 +1007,11 @@ def main():
     )
     
     generator = WorkloadGenerator(args.namespace)
+    
+    # Kubernetes Job 강제 사용 설정
+    if args.force_k8s_jobs:
+        generator.spark_generator.fallback_to_k8s_jobs = True
+        generator.spark_generator.spark_operator_available = False
     
     if args.mode == 'single':
         # 단일 작업 제출
@@ -668,23 +1028,31 @@ def main():
             return
             
         if args.dry_run:
-            yaml_content = generator.spark_generator.generate_spark_application_yaml(template)
+            if args.force_k8s_jobs:
+                yaml_content = generator.spark_generator.generate_k8s_job_yaml(template)
+            else:
+                yaml_content = generator.spark_generator.generate_spark_application_yaml(template)
             print(yaml_content)
         else:
-            success = generator.spark_generator.submit_job(template)
+            success = generator.spark_generator.submit_job(template, force_k8s_job=args.force_k8s_jobs)
             print(f"작업 제출 {'성공' if success else '실패'}")
             
     elif args.mode == 'batch':
         # 배치 모드: 랜덤 작업들을 일정 간격으로 제출
+        success_count = 0
         for i in range(args.count):
             template = random.choice(generator.spark_generator.templates)
             print(f"[{i+1}/{args.count}] 제출 중: {template.name}")
             
             if not args.dry_run:
-                generator.spark_generator.submit_job(template)
-                
+                if generator.spark_generator.submit_job(template, force_k8s_job=args.force_k8s_jobs):
+                    success_count += 1
+                    
             if i < args.count - 1:  # 마지막 작업이 아니면 대기
                 time.sleep(args.interval)
+                
+        if not args.dry_run:
+            print(f"배치 작업 완료: {success_count}/{args.count} 성공")
                 
     elif args.mode == 'simulation':
         # 시뮬레이션 모드: 현실적인 워크로드 패턴

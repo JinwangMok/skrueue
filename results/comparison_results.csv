@@ -1,0 +1,5 @@
+Scheduler,Throughput (jobs/hour),Avg Wait Time (min),Success Rate (%),OOM Incidents (count),CPU Utilization (%),Memory Utilization (%),Jobs Submitted,Jobs Completed,Jobs Failed
+kueue-default,70.00,0.00,39.1,0,97.0,97.8,179,70,23
+SKRueue-DQN,0.00,0.00,0.0,0,0.0,0.0,179,0,0
+SKRueue-PPO,0.00,0.00,0.0,0,0.0,0.0,179,0,0
+SKRueue-A2C,0.00,0.00,0.0,0,0.0,0.0,179,0,0

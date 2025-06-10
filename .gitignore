@@ -1,6 +1,7 @@
 draft.md
 secret/*
 skrueue_cluster_info_*
+debug/*
 *.log
 *.tmp
 *.bak
