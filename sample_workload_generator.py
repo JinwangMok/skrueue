@@ -6,7 +6,7 @@
 import os
 import time
 import yaml
-import random
+import random   
 import logging
 import argparse
 import subprocess
@@ -297,7 +297,7 @@ class SparkJobGenerator:
                                       additional_config: Dict = None) -> str:
         """SparkApplication YAML 생성"""
         self.job_counter += 1
-        job_name = f"{template.name}-{self.job_counter:04d}"
+        job_name = f"k8s-{template.name}-{int(time.time())}-{random.randint(100,999)}"
         
         # 추가 설정 병합
         spark_config = template.spark_config.copy()
