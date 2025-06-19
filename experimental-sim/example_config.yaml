@@ -1,0 +1,63 @@
+# 클러스터 노드 구성
+nodes:
+    - cpu_cores: 32
+      cpu_ghz: 3.5
+      memory_gb: 128
+      gpu_count: 2
+      node_type: worker
+    - cpu_cores: 16
+      cpu_ghz: 2.8
+      memory_gb: 64
+      gpu_count: 0
+      node_type: worker
+
+# 작업 유형 정의
+job_types:
+    batch:
+        name: batch
+        cpu_range: [500, 4000]
+        memory_range: [1024, 8192]
+        duration_range: [60, 3600]
+        priority_range: [1, 5]
+        failure_rate: 0.05
+
+    ml_training:
+        name: ml_training
+        cpu_range: [2000, 16000]
+        memory_range: [4096, 32768]
+        duration_range: [1800, 14400]
+        priority_range: [3, 8]
+        failure_rate: 0.08
+
+# 시간대별 패턴
+time_patterns:
+    - time_range: [9, 18]
+      job_distribution:
+          batch: 0.3
+          ml_training: 0.2
+
+    - time_range: [18, 9]
+      job_distribution:
+          batch: 0.5
+          ml_training: 0.3
+
+# 시뮬레이션 파라미터
+max_queue_size: 50
+min_queue_size: 5
+simulation_duration: 86400
+tick_interval: 10
+
+# RL 파라미터
+state_dim: 67
+dynamic_state: true
+
+# 데이터 증강
+noise_factor: 0.1
+anomaly_rate: 0.01
+
+# 보상 가중치
+reward_weights:
+    throughput: 0.4
+    utilization: 0.3
+    wait_penalty: 0.2
+    failure_penalty: 0.1

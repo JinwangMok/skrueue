@@ -1,0 +1,65 @@
+# SKRueue Configuration File
+
+# Kueue settings
+kueue:
+    namespaces:
+        - skrueue-test
+        - default
+    max_queue_size: 10
+    admit_interval: 5
+
+# Reinforcement Learning settings
+rl:
+    algorithm: DQN
+    state_dim: 67
+    learning_rate: 0.0001
+    buffer_size: 50000
+    training_steps: 20000
+    model_save_dir: models
+    reward_weights:
+        throughput: 0.4
+        utilization: 0.3
+        wait_penalty: 0.2
+        failure_penalty: 0.1
+
+# Data collection settings
+data:
+    collection_interval: 10
+    retention_days: 30
+    db_path: data/skrueue_training_data.db
+    export_path: data/training_data.csv
+
+# Workload generation settings
+workload:
+    job_templates_path: config/job_templates.yaml
+    submission_interval: 20
+    max_concurrent_jobs: 8
+    simulation_duration_hours: 24
+    hourly_patterns:
+        night:
+            hours: [0, 1, 2, 3, 4, 5]
+            job_rate: 2
+            templates: ["etl-pipeline", "big-data-aggregation"]
+        business:
+            hours: [9, 10, 11, 12, 13, 14, 15, 16, 17]
+            job_rate: 5
+            templates: ["realtime-analytics", "ml-training"]
+        evening:
+            hours: [18, 19, 20, 21, 22, 23]
+            job_rate: 3
+            templates: ["big-data-aggregation", "ml-training"]
+
+# Test settings
+test:
+    test_duration_minutes: 30
+    algorithms_to_test:
+        - DQN
+        - PPO
+        - A2C
+    baseline_scheduler: kueue-default
+    output_dir: test_results
+
+# Environment settings
+cluster_name: default
+environment: development
+log_level: INFO
