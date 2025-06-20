@@ -2,6 +2,9 @@
 
 SKRueue는 Kubernetes의 Kueue 스케줄러에 강화학습(Reinforcement Learning)을 적용하여 작업 스케줄링을 최적화하는 시스템입니다.
 
+RL 훈련을 위한 공개 데이터 셋은 아래 링크에서 제공받을 수 있습니다. (Ensurance due: 2025.06.30)
+https://drive.google.com/file/d/1Hiv4E8SJtf5m0xzbIgdDhXY-Tt0QfqJq/view?usp=sharing
+
 ## 🚀 주요 특징
 
 -   **67차원 상태 공간**: 클러스터 상태와 작업 큐 정보를 포함한 풍부한 상태 표현
