@@ -31,7 +31,7 @@ class SimulatedKubernetesEnv(gym.Env):
         
         # 행동 공간 정의 (작업 인덱스 × 노드 인덱스)
         max_jobs = config.max_queue_size if config.dynamic_state else 10
-        self.action_space = spaces.MultiDiscrete([max_jobs, len(config.nodes)])
+        self.action_space = spaces.Discrete(max_jobs * len(config.nodes))
         
         # 에피소드 설정
         self.max_steps = config.simulation_duration // config.tick_interval
@@ -74,14 +74,13 @@ class SimulatedKubernetesEnv(gym.Env):
         
         return state, info
     
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """환경 스텝 실행"""
         # 새 작업 제출
         self._submit_pending_jobs()
         
-        # 행동 실행
-        job_idx, node_idx = action
-        reward = self._execute_action(job_idx, node_idx)
+        # 행동 실행 (action을 전달)
+        reward = self._execute_action(action)
         
         # 시뮬레이션 시간 진행
         self.simulator.step(self.config.tick_interval)
@@ -106,8 +105,13 @@ class SimulatedKubernetesEnv(gym.Env):
             self.simulator.submit_job(job)
             self.workload_idx += 1
     
-    def _execute_action(self, job_idx: int, node_idx: int) -> float:
+    def _execute_action(self, action: int) -> float:  # 파라미터 변경
         """행동 실행 및 보상 계산"""
+        # action을 job_idx와 node_idx로 분해
+        max_jobs = self.config.max_queue_size if self.config.dynamic_state else 10
+        job_idx = action // len(self.config.nodes)
+        node_idx = action % len(self.config.nodes)
+        
         # 유효성 검사
         if (job_idx >= len(self.simulator.pending_queue) or 
             node_idx >= len(self.simulator.nodes)):

@@ -92,7 +92,7 @@ class JobGenerator:
             submit_time=current_time
         )
     
-    def generate_workload_pattern(self, duration: int, avg_arrival_rate: float = 0.5) -> List[Tuple[float, Job]]:
+    def generate_workload_pattern(self, duration: int, avg_arrival_rate: float = 0.5) -> List[tuple[float, Job]]:
         """전체 워크로드 패턴 생성"""
         workload = []
         current_time = 0.0

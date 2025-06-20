@@ -5,7 +5,7 @@ from pathlib import Path
 
 from config.simulation_config import SimulationConfig, create_default_config
 from data_augmentation.data_generator import DataAugmenter
-from experiments.experiment_runner import ExperimentRunner
+from experiments import experiment_runner
 
 def setup_logging(verbose: bool = False):
     """로깅 설정"""
@@ -15,10 +15,29 @@ def setup_logging(verbose: bool = False):
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
+def setup_project():
+    """프로젝트 초기 설정"""
+    # 필요한 디렉토리 생성
+    directories = ['data', 'results', 'models', 'config', 'logs']
+    for dir_name in directories:
+        Path(dir_name).mkdir(exist_ok=True)
+    
+    # 기본 설정 파일 생성
+    config_path = Path('config/default_config.yaml')
+    if not config_path.exists():
+        config = create_default_config()
+        config.to_yaml(str(config_path))
+        print(f"Created default config at {config_path}")
+    
+    print("Project setup completed!")
+
 def main():
     parser = argparse.ArgumentParser(description="SKRueue Simulator")
     
     subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # 설정 명령
+    setup_parser = subparsers.add_parser("setup", help="Setup project structure")
     
     # 데이터 생성 명령
     data_parser = subparsers.add_parser("generate", help="Generate training data")
@@ -47,6 +66,16 @@ def main():
     
     args = parser.parse_args()
     
+    # 명령이 없으면 도움말 출력
+    if args.command is None:
+        parser.print_help()
+        return
+    
+    # setup 명령은 로깅 전에 실행
+    if args.command == "setup":
+        setup_project()
+        return
+    
     # 로깅 설정
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
@@ -73,7 +102,7 @@ def main():
     
     elif args.command == "train":
         logger.info("Starting training...")
-        runner = ExperimentRunner(config)
+        runner = experiment_runner(config)
         results = runner.run_training_experiment(args.algorithms, args.steps)
         
         logger.info("Training completed!")
@@ -99,14 +128,14 @@ def main():
             logger.error("No models found in experiment directory")
             return
         
-        runner = ExperimentRunner(config)
+        runner = experiment_runner(config)
         results = runner.run_evaluation_experiment(model_paths)
         
         logger.info("Evaluation completed!")
     
     elif args.command == "experiment":
         logger.info("Running full experiment...")
-        runner = ExperimentRunner(config)
+        runner = experiment_runner(config)
         
         # 1. 학습
         logger.info("Phase 1: Training models...")

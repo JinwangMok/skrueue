@@ -53,6 +53,8 @@ class DataAugmenter:
         data = []
         workload_idx = 0
         
+        step_counter = 0
+        save_interval = 10  # 10스텝마다 한 번만 저장
         while self.simulator.current_time < self.config.simulation_duration:
             # 새 작업 제출
             while (workload_idx < len(workload) and 
@@ -65,7 +67,7 @@ class DataAugmenter:
             state = self._get_state_vector()
             
             # 스케줄링 결정
-            if len(self.simulator.pending_queue) > 0:
+            if len(self.simulator.pending_queue) > 0 and step_counter % save_interval == 0:
                 action = self._make_scheduling_decision(scheduler_policy)
                 
                 # 행동 실행

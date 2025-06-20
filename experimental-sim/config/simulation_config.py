@@ -64,6 +64,14 @@ class SimulationConfig:
     noise_factor: float = 0.1  # 노이즈 추가 비율
     anomaly_rate: float = 0.01  # 이상치 발생 비율
     
+    # 보상 가중치
+    reward_weights: Dict[str, float] = field(default_factory=lambda: {
+        "throughput": 0.4,
+        "utilization": 0.3,
+        "wait_penalty": 0.2,
+        "failure_penalty": 0.1
+    })
+    
     @classmethod
     def from_yaml(cls, path: str):
         """YAML 파일에서 설정 로드"""
@@ -73,8 +81,25 @@ class SimulationConfig:
     
     def to_yaml(self, path: str):
         """설정을 YAML 파일로 저장"""
+        import yaml
+        
+        def convert_to_dict(obj):
+            """데이터클래스를 딕셔너리로 변환"""
+            if hasattr(obj, '__dataclass_fields__'):
+                return {k: convert_to_dict(v) for k, v in obj.__dict__.items()}
+            elif isinstance(obj, list):
+                return [convert_to_dict(item) for item in obj]
+            elif isinstance(obj, dict):
+                return {k: convert_to_dict(v) for k, v in obj.items()}
+            elif isinstance(obj, tuple):
+                return list(obj)
+            else:
+                return obj
+        
+        data = convert_to_dict(self)
+        
         with open(path, 'w') as f:
-            yaml.dump(self.__dict__, f)
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 # 기본 설정 생성 함수
 def create_default_config():
