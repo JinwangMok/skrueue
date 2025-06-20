@@ -2,6 +2,11 @@ draft.md
 secret/*
 .tmp/*
 skrueue_cluster_info_*
+experimental-sim/tmp.py
+experimental-sim/results/*/*.csv
+experimental-sim/results/*/*.json
+experimental-sim/results/*/*.zip
+experimental-sim/data/*
 debug/*
 *.log
 *.tmp
