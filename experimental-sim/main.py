@@ -5,7 +5,7 @@ from pathlib import Path
 
 from config.simulation_config import SimulationConfig, create_default_config
 from data_augmentation.data_generator import DataAugmenter
-from experiments import experiment_runner
+from experiments.experiment_runner import ExperimentRunner
 
 def setup_logging(verbose: bool = False):
     """로깅 설정"""
@@ -102,7 +102,7 @@ def main():
     
     elif args.command == "train":
         logger.info("Starting training...")
-        runner = experiment_runner(config)
+        runner = ExperimentRunner(config)
         results = runner.run_training_experiment(args.algorithms, args.steps)
         
         logger.info("Training completed!")
@@ -128,14 +128,14 @@ def main():
             logger.error("No models found in experiment directory")
             return
         
-        runner = experiment_runner(config)
+        runner = ExperimentRunner(config)
         results = runner.run_evaluation_experiment(model_paths)
         
         logger.info("Evaluation completed!")
     
     elif args.command == "experiment":
         logger.info("Running full experiment...")
-        runner = experiment_runner(config)
+        runner = ExperimentRunner(config)
         
         # 1. 학습
         logger.info("Phase 1: Training models...")
